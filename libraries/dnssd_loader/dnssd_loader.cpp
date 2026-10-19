@@ -21,10 +21,16 @@ DNSServiceErrorType DNSSD_API DNSServiceRegister
     DNSServiceRegisterReply             callBack,      /* may be NULL */
     void                                *context       /* may be NULL */
     ) {
-        // python3 -c 'from ctypes import *; sdRef = c_int(); CDLL('libdns_sd.so').DNSServiceRegister(byref(sdRef), flags, interfaceIndex, name, regtype, domain, host, txtLen, txtRecord, None, None)'
-        std::string pyCommand = "from ctypes import *; dll = CDLL('libdns_sd.so'); ";
+        // python3 -c 'from ctypes import *; sdRef = c_void_p(); CDLL('libdns_sd.so').DNSServiceRegister(byref(sdRef), flags, interfaceIndex, name, regtype, domain, host, txtLen, txtRecord, None, None)'
+        // Distributions ship the versioned libdns_sd.so.1 in the runtime package (Debian/Ubuntu:
+        // libavahi-compat-libdnssd1); the unversioned libdns_sd.so symlink only comes with the -dev package.
+        std::string pyCommand = "from ctypes import *\n"
+            "try: dll = CDLL('libdns_sd.so.1')\n"
+            "except OSError: dll = CDLL('libdns_sd.so')\n";
 
-        pyCommand += "sdRef = c_int(); ";
+        // DNSServiceRef is a pointer. A c_int holds 4 bytes, so on a 64-bit host the library wrote
+        // 8 bytes into a 4-byte buffer.
+        pyCommand += "sdRef = c_void_p(); ";
 #define INT_ARG(argname) (std::string("") + #argname " = " + std::to_string(argname) + "; ")
 #define STR_ARG(argname) (argname ? std::string(#argname " = br'") + argname + "'; " : std::string(#argname " = None; "))
         pyCommand += INT_ARG(flags);
@@ -39,7 +45,9 @@ DNSServiceErrorType DNSSD_API DNSServiceRegister
         std::string txtRecordHex = "";
         for (int i = 0; i < txtLen; i++) {
             char buf[16] = { 0 };
-            sprintf(buf, "\\x%02X", *((char *)txtRecord + i));
+            // unsigned char: where plain char is signed (x86_64, i386), a byte from 0x80 up was
+            // printed as \xFFFFFF80, which Python reads as \xFF followed by the text "FFFF80".
+            sprintf(buf, "\\x%02X", *((unsigned char *)txtRecord + i));
             txtRecordHex += buf;
         }
         pyCommand += "txtRecord = b'" + txtRecordHex + "'; ";
