@@ -7,6 +7,8 @@
 #include <set>
 #include <ctime>
 #include <cstdlib>
+#include <cstring>
+#include <cctype>
 
 #include "AnisetteData.h"
 #include "AltServerApp.h"
@@ -139,9 +141,30 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 					odslog(key << ": " << jsonVal.at(key).as_string().c_str());
 				}
 
+				// X-Apple-I-Client-Time is UTC, for example 2026-09-26T12:34:56Z. Some anisette servers add
+				// fractional seconds or leave out the Z; both name the same UTC instant. Any other value,
+				// including a numeric UTC offset that timegm() would ignore, is rejected: it would
+				// otherwise be sent to Apple as a wrong client time.
+				std::string clientTime = jsonVal.at("X-Apple-I-Client-Time").as_string();
 				struct tm tm = { 0 };
-				strptime(jsonVal.at("X-Apple-I-Client-Time").as_string().c_str(), "%Y-%m-%dT%H:%M:%SZ", &tm);
-				unsigned long ts = mktime(&tm);
+				const char* tail = strptime(clientTime.c_str(), "%Y-%m-%dT%H:%M:%S", &tm);
+				if (tail != NULL && *tail == '.')
+				{
+					do
+					{
+						tail++;
+					} while (isdigit((unsigned char)*tail));
+				}
+
+				if (tail == NULL || (*tail != '\0' && strcmp(tail, "Z") != 0))
+				{
+					odslog("Invalid X-Apple-I-Client-Time from the anisette server: " << clientTime);
+					throw ServerError(ServerErrorCode::InvalidAnisetteData, {
+						{ LocalizedFailureErrorKey, "The anisette server returned an X-Apple-I-Client-Time that is not a UTC time of the form YYYY-MM-DDTHH:MM:SSZ: " + clientTime }
+					});
+				}
+
+				unsigned long ts = timegm(&tm); // X-Apple-I-Client-Time is UTC; mktime() would read it as local time
 				struct timeval tv = { 0 };
 				tv.tv_sec = ts;
 				tv.tv_usec = 0;
