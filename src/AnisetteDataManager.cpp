@@ -169,7 +169,26 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 				tv.tv_sec = ts;
 				tv.tv_usec = 0;
 
-				std::string sanitizedClientInfo = SanitizeClientInfo(jsonVal.at("X-MMe-Client-Info").as_string());
+				// Client info sent to Apple as X-Mme-Client-Info (and handed to AltStore with the
+				// anisette data). Default: the native Windows AuthKit identity AltServer for
+				// Windows uses since 1.7.3, which Apple accepts as of October 2026.
+				// ALTSERVER_CLIENT_INFO overrides it; "anisette" or "original" uses the anisette
+				// server's own value. Any value still goes through SanitizeClientInfo, because
+				// gsa.apple.com rejects every client info containing com.apple.dt.Xcode.
+				std::string clientInfo = "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>";
+				const char* envClientInfo = getenv("ALTSERVER_CLIENT_INFO");
+				if (envClientInfo)
+				{
+					if (std::string(envClientInfo) == "anisette" || std::string(envClientInfo) == "original")
+					{
+						clientInfo = jsonVal.at("X-MMe-Client-Info").as_string();
+					}
+					else if (strlen(envClientInfo) > 0)
+					{
+						clientInfo = envClientInfo;
+					}
+				}
+				std::string sanitizedClientInfo = SanitizeClientInfo(clientInfo);
 				odslog("Sanitized client info: " << sanitizedClientInfo);
 
 				odslog("Building anisetteData obj...");
