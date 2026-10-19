@@ -98,6 +98,42 @@ assumed the BSD layout (byte 0 = `sa_len`, byte 1 = family) and failed with
 `libraries/libimobiledevice/src/idevice.c` now detects both layouts, so `USBMUXD_SOCKET_ADDRESS`
 can point straight at netmuxd. A BSD-format proxy in front of netmuxd keeps working as well.
 
+## Fix 4: Remote AltServer setup (`PairingFileRequest`)
+
+### Symptom
+
+In AltStore Classic 2.3, **Set up Remote AltServer…** fails with "unable to pair" and AltServer
+logs `Failed to handle request:AltServer does not support this request.`
+
+### Cause
+
+AltStore Classic 2.3 asks AltServer for a RemotePairing (RPPairing) file, the iOS 17+ pairing
+record with a `private_key`. AltStore keeps it in its keychain and uses it to install and refresh
+apps on the device itself over LocalDevVPN. AltServer for macOS creates it in
+`DevicePairingManager.swift` with idevice's `tunnel_pair_usb()`; AltServer-Linux had no handler for
+the request.
+
+### Fix
+
+- `upstream_repo/AltServer/ClientConnection.cpp` handles `PairingFileRequest` and answers with a
+  `PairingFileResponse` carrying the file. `upstream_repo/AltServer/DevicePairingManager.h` declares
+  the pairing interface; the `DevicePairingManager.cpp` next to it is the Windows version, which
+  throws `UnknownRequest`, and the Linux build replaces it with `src/DevicePairingManager.cpp`.
+- `src/DevicePairingManager.cpp` is a C++ port of `DevicePairingManager.swift`: it looks up the
+  device by UDID in usbmuxd, calls `tunnel_pair_usb()` (the device shows a Trust prompt for
+  "AltServer on <hostname>") and serializes the pairing file. It reads `USBMUXD_SOCKET_ADDRESS` by
+  libusbmuxd's rules (`UNIX:<path>`, `<host>:<port>`, otherwise `/var/run/usbmuxd`), so the device
+  lookup and the pairing connection use the same usbmuxd as the rest of AltServer-Linux. It pairs
+  only over the device's USB connection, not a network entry for the same UDID. The pairing
+  runs on its own thread with an 8 MiB stack: `tunnel_pair_usb()` polls idevice's pairing future on
+  the calling thread, and that overflows the 128 KiB stack musl gives cpprestsdk's pool threads.
+- `libraries/idevice` is [idevice](https://github.com/jkcoxson/idevice) v0.1.68, built with the
+  features `usbmuxd,tunnel_tcp_stack,ring` (`makefiles/idevice-build/idevice-features.txt`).
+  idevice's static library also exports libplist-compatible `plist_*` functions and the Rust standard
+  library, which would clash with the vendored libplist. `makefiles/idevice-build/idevice.mak`
+  therefore prelinks it into one object (`ld -r`) and keeps only the functions in
+  `idevice-api.txt` global (`objcopy --keep-global-symbols`).
+
 ## Prebuilt binaries
 
 Static binaries for x86_64, aarch64, armv7 and i586 are attached to the
@@ -109,24 +145,33 @@ produces them as GitHub Actions artifacts, which expire after 90 days.
 Builds run in the prebuilt upstream Alpine image. On an Apple Silicon Mac, Rosetta runs the amd64
 container at native speed and a clean build takes about 30 seconds.
 
+The builder images have no Rust toolchain, so idevice (Fix 4) is built first with
+`makefiles/idevice-build/build-idevice-cross.sh`, which runs cargo-zigbuild in the
+`ghcr.io/rust-cross/cargo-zigbuild` image and prints the path of the static library:
+
 ```bash
 git clone --recursive -b ng https://github.com/jaakkopalvaila/AltServer-Linux
 cd AltServer-Linux
+lib=$(makefiles/idevice-build/build-idevice-cross.sh x86_64-unknown-linux-musl)
 mkdir -p build
 docker run --rm --platform linux/amd64 -v "$PWD:/workdir" -w /workdir \
   ghcr.io/nyamisty/altserver_builder_alpine_amd64:latest \
-  bash -c 'cd build && make -f ../Makefile -j8'
+  bash -c "cd build && make -f ../Makefile -j8 IDEVICE_FFI_LIB=/workdir/${lib#$PWD/}"
 ```
 
 The result is a statically linked `build/AltServer-x86_64`. Other architectures use the
-`altserver_builder_alpine_{aarch64,armv7,i386}` images.
+`altserver_builder_alpine_{aarch64,armv7,i386}` images with the Rust targets
+`aarch64-unknown-linux-musl`, `armv7-unknown-linux-musleabihf` and `i686-unknown-linux-musl`.
+Without `IDEVICE_FFI_LIB`, the Makefile runs `cargo build` itself, which needs cargo in the build environment
+(tested with Rust 1.93 and 1.98).
 
-Sanity-check that all three fixes are present:
+Sanity-check that the fixes are present:
 
 ```bash
 strings build/AltServer-x86_64 | grep -c "missing path separator"   # Fix 1, new ldid      -> 1
 strings build/AltServer-x86_64 | grep -c "Sanitized client info"    # Fix 2, sign-in        -> 1
 grep -c idevice_sockaddr_len libraries/libimobiledevice/src/idevice.c  # Fix 3, netmuxd  -> >= 1
+strings build/AltServer-x86_64 | grep -c "Generated pairing file"   # Fix 4, pairing file   -> 1
 ```
 
 ## Running

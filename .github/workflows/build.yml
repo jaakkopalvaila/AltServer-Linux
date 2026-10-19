@@ -69,7 +69,15 @@ jobs:
     needs: [check]
     strategy:
       matrix:
-        builder: [ghcr.io/nyamisty/altserver_builder_alpine_armv7, ghcr.io/nyamisty/altserver_builder_alpine_aarch64, ghcr.io/nyamisty/altserver_builder_alpine_amd64, ghcr.io/nyamisty/altserver_builder_alpine_i386]
+        include:
+          - builder: ghcr.io/nyamisty/altserver_builder_alpine_armv7
+            rust_target: armv7-unknown-linux-musleabihf
+          - builder: ghcr.io/nyamisty/altserver_builder_alpine_aarch64
+            rust_target: aarch64-unknown-linux-musl
+          - builder: ghcr.io/nyamisty/altserver_builder_alpine_amd64
+            rust_target: x86_64-unknown-linux-musl
+          - builder: ghcr.io/nyamisty/altserver_builder_alpine_i386
+            rust_target: i686-unknown-linux-musl
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -92,11 +100,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Prepare build
         run: mkdir /tmp/build_output
+      - name: Build idevice
+        run: |
+          lib=$(makefiles/idevice-build/build-idevice-cross.sh ${{ matrix.rust_target }})
+          echo "IDEVICE_FFI_LIB=/workdir/${lib#$PWD/}" >> "$GITHUB_ENV"
       - name: Build
         run: |
           image=${{ matrix.builder }}
           docker pull $image
-          docker run -v ${PWD}:/workdir -w /workdir $image bash -c 'mkdir build; cd build; make -f ../Makefile -j3'
+          docker run -v ${PWD}:/workdir -w /workdir $image bash -c "mkdir build; cd build; make -f ../Makefile -j3 IDEVICE_FFI_LIB=$IDEVICE_FFI_LIB"
           cp build/AltServer-* /tmp/build_output; chmod +x /tmp/build_output/*
           sudo rm -rf build
           git clean -fdX
