@@ -21,6 +21,8 @@
 #include "Error.hpp"
 
 #include "AltServerApp.h"
+#include "AppleAPI.hpp"
+#include "AnisetteDataManager.h"
 
 #define odslog(msg) { std::stringstream ss; ss << msg << std::endl; OutputDebugStringA(ss.str().c_str()); }
 
@@ -109,6 +111,11 @@ int main(int argc, char *argv[]) {
 	
 	char *ipaPath = NULL;
 	int debugLogLevel = 0;
+
+	// Fresh anisette data between 2FA sign-in steps (Apple rejects reused one-time passwords).
+	AppleAPI::getInstance()->anisetteDataRefreshHandler = []() {
+		return AnisetteDataManager::instance()->FetchAnisetteData();
+	};
 
 	while (1) {
 		int this_option_optind = optind ? optind : 1;
