@@ -98,6 +98,34 @@ assumed the BSD layout (byte 0 = `sa_len`, byte 1 = family) and failed with
 `libraries/libimobiledevice/src/idevice.c` now detects both layouts, so `USBMUXD_SOCKET_ADDRESS`
 can point straight at netmuxd. A BSD-format proxy in front of netmuxd keeps working as well.
 
+## Fix 4 — October 2026: -80045 and two-factor codes
+
+Since 2026-10-13 Apple checks that `X-Mme-Client-Info` matches the platform the anisette data was
+provisioned as. Measured against a local `dadoum/anisette-v3-server` with a made-up account:
+
+| client info sent | Apple's answer |
+| --- | --- |
+| the anisette server's own Mac string | `-80045` "This action cannot be completed at this time" |
+| Android (`<Pixel 7> <Android;14;...>`) | HTTP 503 |
+| Windows iTunes (`<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>`) | normal account check |
+
+The fork therefore defaults to the Windows AuthKit identity that AltServer for Windows itself uses
+since 1.7.3. `ALTSERVER_CLIENT_INFO` overrides it; `anisette` or `original` passes the anisette
+server's own value through. Whatever is chosen still goes through the `com.apple.dt.Xcode` sanitizer.
+AltStore on the device receives the same client info with the anisette data, so this also governs
+AltStore's own sign-in. `ALTSERVER_GSA_USER_AGENT` overrides the GrandSlam User-Agent.
+
+The same change made Apple push the verification code to trusted devices on its own and answer the
+`complete` step with `hsc 409` and no `au`. AltSign treated that as "no 2FA needed" and failed at
+`apptokens` with `-22411`, without ever showing a code prompt. The fork ports
+rileytestut/AltSign#59: a 409 without `au` goes down the trusted-device path without requesting a
+second code, and anisette data is refreshed before the code is validated and before the second
+sign-in.
+
+**AltStore still shows -22411 without a code prompt?** That bug is inside the AltStore app. Sign in
+once from AltServer-Linux on the command line and enter the code there; Apple then trusts the
+anisette identity, and AltStore, which borrows it from AltServer, signs in without a code.
+
 ## Prebuilt binaries
 
 Static binaries for x86_64, aarch64, armv7 and i586 are attached to the
@@ -139,5 +167,7 @@ ALTSERVER_ANISETTE_SERVER=http://127.0.0.1:6969 \
 
 `-d` enables debug output. Wi-Fi installs need netmuxd listening on that address (see Fix 3).
 
-To check sign-in without real credentials, run it with a throwaway account. HTTP 503 means Apple is
-still blocking; a GSA error such as `-20101` or `-20209` means the request reached the service.
+To check sign-in without real credentials, run it with a throwaway account. HTTP 503 means Apple's
+edge is blocking, `-80045` means the client info does not match the anisette provisioning (Fix 4),
+and an account error such as `-20970` "account information entered incorrectly" means the request
+passed every check up to the password.
