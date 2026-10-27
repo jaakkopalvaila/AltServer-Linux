@@ -109,11 +109,12 @@ provisioned as. Measured against a local `dadoum/anisette-v3-server` with a made
 | Android (`<Pixel 7> <Android;14;...>`) | HTTP 503 |
 | Windows iTunes (`<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>`) | normal account check |
 
-The fork therefore defaults to the Windows AuthKit identity that AltServer for Windows itself uses
-since 1.7.3. `ALTSERVER_CLIENT_INFO` overrides it; `anisette` or `original` passes the anisette
-server's own value through. Whatever is chosen still goes through the `com.apple.dt.Xcode` sanitizer.
-AltStore on the device receives the same client info with the anisette data, so this also governs
-AltStore's own sign-in. `ALTSERVER_GSA_USER_AGENT` overrides the GrandSlam User-Agent.
+Release `ng-2026-10-20` therefore defaulted to the Windows AuthKit identity. **Since 2026-10-21
+that no longer works; see Fix 5.** The client info now defaults to the anisette server's own value.
+`ALTSERVER_CLIENT_INFO` overrides it: `windows` selects the Windows identity, and any other value is
+sent as is. Whatever is chosen still goes through the `com.apple.dt.Xcode` sanitizer. AltStore on the
+device receives the same client info with the anisette data, so this also governs AltStore's own
+sign-in. `ALTSERVER_GSA_USER_AGENT` overrides the GrandSlam User-Agent.
 
 The same change made Apple push the verification code to trusted devices on its own and answer the
 `complete` step with `hsc 409` and no `au`. AltSign treated that as "no 2FA needed" and failed at
@@ -125,6 +126,37 @@ sign-in.
 **AltStore still shows -22411 without a code prompt?** That bug is inside the AltStore app. Sign in
 once from AltServer-Linux on the command line and enter the code there; Apple then trusts the
 anisette identity, and AltStore, which borrows it from AltServer, signs in without a code.
+
+## Fix 5 — 21 October 2026: -80046, Mac anisette required
+
+Around 2026-10-21 Apple tightened the check again. Windows and Android identities now pass the
+password step but fail after the verification code, at `apptokens`, with `-80046` "This action
+cannot be completed at this time" (AltStore#1840, SideStore#1686, xtool#378). Only anisette data
+provisioned as a **Mac**, sent with its own Mac client info, gets through. xtool, iLoader and impactor
+fixed it the same way.
+
+What that means for AltServer-Linux:
+
+- `dadoum/anisette-v3-server` provisions an Android device. It cannot produce Mac anisette, so a
+  local anisette-v3 container no longer works for sign-in.
+- Point `ALTSERVER_ANISETTE_SERVER` at a server that provides Mac anisette, and keep the default
+  client info, which passes the server's own value through. AltServer-Linux uses the plain
+  `GET /` protocol, which `https://mac-ani.jkcoxson.com` answers with Mac anisette data and
+  `<MacBookPro13,3> <Mac OS X;10.12.6;16G29> <com.apple.AuthKit/1 (com.apple.akd/1.0)>`.
+- That server is run by a third party. It never receives your Apple ID or password, which go only
+  to Apple. Its plain `GET /` endpoint gives every client the same shared Mac identity, though, and
+  Apple can treat sign-ins from a shared identity with more suspicion.
+
+Verified on 2026-10-27: with this anisette, AltStore Classic signed in to a new free Apple ID
+through AltServer-Linux and installed an app on iOS 27.
+
+**Protect your Apple account.** Repeated failed sign-ins make Apple lock the account. While these
+errors were being worked out, the maintainer's account was locked twice in four days. Stop after one
+or two failures and find the cause first. After a lock or a password reset Apple can answer
+`-36607` "Unable to sign you in to your Apple Account. Try again later" for days; do not retry
+during that period. If `iforgot.apple.com` says the account cannot be unlocked online, unlock it in
+Settings on an Apple device that is signed in with it. Use a separate free Apple ID for sideloading,
+so a lock never hits your main account.
 
 ## Prebuilt binaries
 
@@ -161,13 +193,15 @@ grep -c idevice_sockaddr_len libraries/libimobiledevice/src/idevice.c  # Fix 3, 
 
 ```bash
 USBMUXD_SOCKET_ADDRESS=127.0.0.1:27015 \
-ALTSERVER_ANISETTE_SERVER=http://127.0.0.1:6969 \
+ALTSERVER_ANISETTE_SERVER=https://mac-ani.jkcoxson.com \
 ./AltServer-x86_64 -d -u <UDID> -a <apple-id> -p <password> AltStore.ipa
 ```
 
-`-d` enables debug output. Wi-Fi installs need netmuxd listening on that address (see Fix 3).
+`-d` enables debug output. Wi-Fi installs need netmuxd listening on that address (see Fix 3). Any
+anisette server that provides Mac anisette works; see Fix 5 before you choose one.
 
 To check sign-in without real credentials, run it with a throwaway account. HTTP 503 means Apple's
 edge is blocking, `-80045` means the client info does not match the anisette provisioning (Fix 4),
 and an account error such as `-20970` "account information entered incorrectly" means the request
-passed every check up to the password.
+passed every check up to the password. A made-up account cannot reach the step where `-80046`
+occurs, so this test cannot prove that a setup is free of it.

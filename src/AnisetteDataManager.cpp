@@ -170,22 +170,25 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 				tv.tv_usec = 0;
 
 				// Client info sent to Apple as X-Mme-Client-Info (and handed to AltStore with the
-				// anisette data). Default: the native Windows AuthKit identity AltServer for
-				// Windows uses since 1.7.3, which Apple accepts as of October 2026.
-				// ALTSERVER_CLIENT_INFO overrides it; "anisette" or "original" uses the anisette
-				// server's own value. Any value still goes through SanitizeClientInfo, because
-				// gsa.apple.com rejects every client info containing com.apple.dt.Xcode.
-				std::string clientInfo = "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>";
+				// anisette data). Default: the anisette server's own value. Since 2026-10-21 Apple
+				// accepts only a client info that matches the platform the anisette data was
+				// provisioned as, and only Mac anisette at the 2FA/apptokens steps (README-NG, Fix 5).
+				// ALTSERVER_CLIENT_INFO overrides it: "windows" selects the Windows AuthKit identity
+				// AltServer for Windows uses, any other non-empty value is sent as is. Any value
+				// still goes through SanitizeClientInfo, because gsa.apple.com rejects every client
+				// info containing com.apple.dt.Xcode.
+				std::string clientInfo = jsonVal.at("X-MMe-Client-Info").as_string();
 				const char* envClientInfo = getenv("ALTSERVER_CLIENT_INFO");
-				if (envClientInfo)
+				if (envClientInfo && strlen(envClientInfo) > 0)
 				{
-					if (std::string(envClientInfo) == "anisette" || std::string(envClientInfo) == "original")
+					std::string value(envClientInfo);
+					if (value == "windows")
 					{
-						clientInfo = jsonVal.at("X-MMe-Client-Info").as_string();
+						clientInfo = "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>";
 					}
-					else if (strlen(envClientInfo) > 0)
+					else if (value != "anisette" && value != "original")
 					{
-						clientInfo = envClientInfo;
+						clientInfo = value;
 					}
 				}
 				std::string sanitizedClientInfo = SanitizeClientInfo(clientInfo);
