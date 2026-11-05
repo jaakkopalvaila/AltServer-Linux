@@ -158,6 +158,23 @@ during that period. If `iforgot.apple.com` says the account cannot be unlocked o
 Settings on an Apple device that is signed in with it. Use a separate free Apple ID for sideloading,
 so a lock never hits your main account.
 
+## Fix 7 — SMS codes for accounts without a trusted device (experimental)
+
+An Apple ID with no trusted Apple device gets its verification code by SMS. GrandSlam then answers
+the password step with `au` = `secondaryAuth`. AltSign recognised only `trustedDeviceSecondaryAuth`, so
+it treated such an account as having no two-factor authentication and the sign-in failed later.
+
+`AltSign/AppleAPI+Authentication.cpp` now requests the code by SMS and validates it with the JSON
+endpoints that rileytestut/AltSign#62 proposes and [isideload](https://github.com/nab138/isideload) uses:
+`PUT /auth/verify/phone` with `{"phoneNumber":{"id":1},"mode":"sms"}`, then
+`POST /auth/verify/phone/securitycode` with the code. The code goes to the account's first trusted
+phone number (id 1). AltServer prints `Enter two factor code` and reads the code from standard input.
+If Apple says a code was already sent and is still valid (HTTP 412, or `-22979` / `-22981`), no new
+SMS is requested. A wrong code is `-21669`; any other error shows Apple's message.
+
+This has not been verified against Apple yet. Try it once, and if it fails, stop and read the log
+(`-d`) before trying again; see the account-lock warning above.
+
 ## Prebuilt binaries
 
 Static binaries for x86_64, aarch64, armv7 and i586 are attached to the
