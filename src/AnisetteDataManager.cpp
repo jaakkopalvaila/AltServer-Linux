@@ -4,6 +4,8 @@
 #include "Error.hpp"
 #include "ServerError.hpp"
 
+#include <map>
+#include <mutex>
 #include <set>
 #include <ctime>
 #include <cstdlib>
@@ -12,6 +14,7 @@
 
 #include "AnisetteData.h"
 #include "AltServerApp.h"
+#include "AnisetteV3.h"
 
 #define odslog(msg) { std::stringstream ss; ss << msg << std::endl; OutputDebugStringA(ss.str().c_str()); }
 
@@ -53,10 +56,11 @@ using namespace web::http::client;          // HTTP client features
 
 std::string GetAnisetteURL() {
 	const char *server = getenv("ALTSERVER_ANISETTE_SERVER");
-	if (server) {
+	if (server && strlen(server) > 0) {
 		return server;
 	}
-	return U("https://armconverter.com/anisette/irGb3Quww8zrhgqnzmrx");
+	// Provides Mac anisette (README-NG, Fix 5) and speaks anisette v3 (Fix 8).
+	return U("https://new.ani.sidestore.io");
 }
 
 // Apple rejects any gsa.apple.com request whose X-Mme-Client-Info (aka
@@ -80,18 +84,76 @@ std::string SanitizeClientInfo(const std::string& clientInfo)
 	return result;
 }
 
+// Client info sent to Apple as X-Mme-Client-Info (and handed to AltStore with the anisette data).
+// Default: the anisette server's own value. Since 2026-10-21 Apple accepts only a client info that
+// matches the platform the anisette data was provisioned as, and only Mac anisette at the 2FA/apptokens
+// steps (README-NG, Fix 5). ALTSERVER_CLIENT_INFO overrides it: "windows" selects the Windows AuthKit
+// identity AltServer for Windows uses, any other non-empty value is sent as is. Any value still goes
+// through SanitizeClientInfo, because gsa.apple.com rejects every client info containing com.apple.dt.Xcode.
+std::string FilterClientInfo(const std::string& serverClientInfo)
+{
+	std::string clientInfo = serverClientInfo;
+	const char* envClientInfo = getenv("ALTSERVER_CLIENT_INFO");
+	if (envClientInfo && strlen(envClientInfo) > 0)
+	{
+		std::string value(envClientInfo);
+		if (value == "windows")
+		{
+			clientInfo = "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>";
+		}
+		else if (value != "anisette" && value != "original")
+		{
+			clientInfo = value;
+		}
+	}
+
+	std::string sanitizedClientInfo = SanitizeClientInfo(clientInfo);
+	odslog("Sanitized client info: " << sanitizedClientInfo);
+	return sanitizedClientInfo;
+}
+
+// ALTSERVER_ANISETTE_PROTOCOL: "v3", "v1", or "auto" (the default), which uses v3 when the server answers
+// /v3/client_info. v3 keeps one provisioned identity on this computer; v1 takes whatever identity the
+// server hands out, which for some servers (new.ani.sidestore.io) is a new one on every request.
+bool UsesAnisetteV3(const std::string& serverURL)
+{
+	const char* value = getenv("ALTSERVER_ANISETTE_PROTOCOL");
+	std::string protocol = (value != nullptr && strlen(value) > 0) ? value : "auto";
+
+	if (protocol == "v3" || protocol == "v1")
+	{
+		return protocol == "v3";
+	}
+
+	if (protocol != "auto")
+	{
+		odslog("Unknown ALTSERVER_ANISETTE_PROTOCOL value " << protocol << ", using auto.");
+	}
+
+	static std::mutex mutex;
+	static std::map<std::string, bool> supportsV3;
+
+	std::lock_guard<std::mutex> lock(mutex);
+	if (supportsV3.count(serverURL) == 0)
+	{
+		supportsV3[serverURL] = AnisetteV3::IsSupported(serverURL);
+		odslog("Anisette server " << serverURL << ": using " << (supportsV3[serverURL] ? "v3" : "v1") << " (auto).");
+	}
+
+	return supportsV3[serverURL];
+}
+
 std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 {
-	// auto client = web::http::client::http_client(U("https://armconverter.com"));
-	// std::string wideURI = ("/anisette/irGb3Quww8zrhgqnzmrx");
-	
-	// auto encodedURI = web::uri::encode_uri(wideURI);
-	// uri_builder builder(encodedURI);
+	std::string serverURL = GetAnisetteURL();
+	if (UsesAnisetteV3(serverURL))
+	{
+		auto anisetteData = AnisetteV3::FetchAnisetteData(serverURL, FilterClientInfo);
+		odslog(*anisetteData);
+		return anisetteData;
+	}
 
-	// http_request request(methods::GET);
-	// request.set_request_uri(builder.to_string());
-
-	auto client = web::http::client::http_client(GetAnisetteURL());
+	auto client = web::http::client::http_client(serverURL);
 	http_request request(methods::GET);
 	
 	std::map<utility::string_t, utility::string_t> headers = {
@@ -122,24 +184,8 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 			})
 		.then([&anisetteData](pplx::task<json::value> previousTask)
 			{
-				odslog("parse anisette data ret");
+				// The values are anisette secrets (machine ID, one-time password), so they stay out of the log.
 				json::value jsonVal = previousTask.get();
-				odslog("Got anisetteData json: " << jsonVal);
-				std::vector<std::string> keys = {
-					"X-Apple-I-MD-M",
-					"X-Apple-I-MD",
-					"X-Apple-I-MD-LU",
-					"X-Apple-I-MD-RINFO",
-					"X-Mme-Device-Id",
-					"X-Apple-I-SRL-NO",
-					"X-MMe-Client-Info",
-					"X-Apple-I-Client-Time",
-					"X-Apple-Locale",
-					"X-Apple-I-TimeZone"
-				};
-				for (auto &key : keys) {
-					odslog(key << ": " << jsonVal.at(key).as_string().c_str());
-				}
 
 				// X-Apple-I-Client-Time is UTC, for example 2026-09-26T12:34:56Z. Some anisette servers add
 				// fractional seconds or leave out the Z; both name the same UTC instant. Any other value,
@@ -169,32 +215,8 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 				tv.tv_sec = ts;
 				tv.tv_usec = 0;
 
-				// Client info sent to Apple as X-Mme-Client-Info (and handed to AltStore with the
-				// anisette data). Default: the anisette server's own value. Since 2026-10-21 Apple
-				// accepts only a client info that matches the platform the anisette data was
-				// provisioned as, and only Mac anisette at the 2FA/apptokens steps (README-NG, Fix 5).
-				// ALTSERVER_CLIENT_INFO overrides it: "windows" selects the Windows AuthKit identity
-				// AltServer for Windows uses, any other non-empty value is sent as is. Any value
-				// still goes through SanitizeClientInfo, because gsa.apple.com rejects every client
-				// info containing com.apple.dt.Xcode.
-				std::string clientInfo = jsonVal.at("X-MMe-Client-Info").as_string();
-				const char* envClientInfo = getenv("ALTSERVER_CLIENT_INFO");
-				if (envClientInfo && strlen(envClientInfo) > 0)
-				{
-					std::string value(envClientInfo);
-					if (value == "windows")
-					{
-						clientInfo = "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>";
-					}
-					else if (value != "anisette" && value != "original")
-					{
-						clientInfo = value;
-					}
-				}
-				std::string sanitizedClientInfo = SanitizeClientInfo(clientInfo);
-				odslog("Sanitized client info: " << sanitizedClientInfo);
+				std::string sanitizedClientInfo = FilterClientInfo(jsonVal.at("X-MMe-Client-Info").as_string());
 
-				odslog("Building anisetteData obj...");
 				anisetteData = std::make_shared<AnisetteData>(
 					jsonVal.at("X-Apple-I-MD-M").as_string(),
 					jsonVal.at("X-Apple-I-MD").as_string(),
