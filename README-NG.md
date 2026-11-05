@@ -230,6 +230,10 @@ provisioned or loaded, and the first 8 characters of its device ID.
 
 AltStore receives the same identity when it asks AltServer for anisette data.
 
+Verified on 2026-11-05 against `new.ani.sidestore.io` with a made-up account: the first run provisioned
+an identity and saved it (mode 600), the second run reused it without provisioning, and both times
+Apple answered the password step with `-20970`, so the v3 anisette passed every check before it.
+
 ## Log output
 
 The log, with or without `-d`, shows the steps, status codes, `au`/`hsc` and the first 8 characters
