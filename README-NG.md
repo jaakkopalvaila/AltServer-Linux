@@ -150,6 +150,10 @@ What that means for AltServer-Linux:
 Verified on 2026-10-27: with this anisette, AltStore Classic signed in to a new free Apple ID
 through AltServer-Linux and installed an app on iOS 27.
 
+**Since 2026-11-05 Apple answers `mac-ani.jkcoxson.com`'s identity with `-80043`**, even for a made-up
+account. `https://new.ani.sidestore.io` provides Mac anisette with the same client info and is now the
+default anisette server, spoken to with the v3 protocol (Fix 8).
+
 **Protect your Apple account.** Repeated failed sign-ins make Apple lock the account. While these
 errors were being worked out, the maintainer's account was locked twice in four days. Stop after one
 or two failures and find the cause first. After a lock or a password reset Apple can answer
@@ -158,7 +162,7 @@ during that period. If `iforgot.apple.com` says the account cannot be unlocked o
 Settings on an Apple device that is signed in with it. Use a separate free Apple ID for sideloading,
 so a lock never hits your main account.
 
-## Fix 7 — SMS codes for accounts without a trusted device (experimental)
+## Fix 7 — SMS codes for accounts without a trusted device
 
 An Apple ID with no trusted Apple device gets its verification code by SMS. GrandSlam then answers
 the password step with `au` = `secondaryAuth`. AltSign recognised only `trustedDeviceSecondaryAuth`, so
@@ -176,9 +180,21 @@ message.
 GrandSlam does not always report such an account as `secondaryAuth`. On 2026-11-05 an account without
 a trusted device got `trustedDeviceSecondaryAuth`: the trusted-device code request made Apple send an
 SMS, the trusted-device validation answered that code with HTTP 200, and the second sign-in still
-required two-factor authentication. Set `ALTSERVER_2FA=sms` for such an account. AltServer then skips
-the trusted-device request and uses the SMS endpoints whenever a code is needed. The log shows `au` and
-`hsc` of the sign-in response and which SMS code to enter.
+required two-factor authentication.
+
+So the method is chosen from the account's 2FA info. `ALTSERVER_2FA` selects it:
+
+- `auto` (default): when a code is needed, AltServer reads the 2FA info (`GET /auth`, which sends
+  nothing). With `noTrustedDevices` it takes the SMS path for the `trustedPhoneNumber`. Apple sends that
+  SMS on its own, so AltServer requests no second one. `au` = `secondaryAuth` also takes the SMS path,
+  requesting the code with `PUT`. Any other account keeps the trusted-device path. `pushMode` doesn't
+  decide, because it is `sms` for the phone numbers of trusted-device accounts too.
+- `sms`: always the SMS path, requesting the code with `PUT`.
+- `trusteddevice`: always the trusted-device path, as before Fix 7.
+
+At the SMS code prompt, `resend` requests one new SMS, for when the expected one doesn't arrive. The
+log shows `au` and `hsc` of the sign-in response, the 2FA info (without the phone number), the chosen
+method and which SMS code to enter.
 
 Apple ties the code to the anisette identity it was validated with. `new.ani.sidestore.io` returns a new
 identity (Device-Id, MD-LU, MD-M) on every request, so the anisette refreshes added in Fix 4 made the
@@ -187,8 +203,39 @@ when it returns the same device; otherwise the sign-in keeps its original aniset
 the Device-Id (first 8 characters) at each step. With such a server every sign-in is still a new device
 to Apple, so it asks for a code every time.
 
-This has not been verified against Apple yet. Try it once, and if it fails, stop and read the log
-(`-d`) before trying again; see the account-lock warning above.
+Verified on 2026-11-05: an account without trusted devices signed in with `ALTSERVER_2FA=sms` and
+v1 anisette from `new.ani.sidestore.io`, and AltServer installed an app. The `auto` choice has not been
+tried against Apple yet. If a sign-in fails, stop and read the log before trying again; see the
+account-lock warning above.
+
+## Fix 8 — anisette v3: one identity, a code only once
+
+A v1 anisette server (`GET /`) hands out whatever identity it likes. `new.ani.sidestore.io` hands out a
+new one on every request, so Apple sees a new device at every sign-in and asks for a code each time.
+An anisette v3 server provisions one identity instead, and the identity's keychain identifier and
+`adi.pb` stay on this computer. After the first sign-in with a code, Apple knows the device.
+
+`src/AnisetteV3.cpp` speaks SideStore's anisette-v3-server protocol, as omnisette and Sideloader do:
+`GET /v3/client_info`, provisioning over the `/v3/provisioning_session` websocket with Apple's
+`midStartProvisioning` and `midFinishProvisioning` (relayed by this computer as the device), and
+`POST /v3/get_headers` for each set of anisette data. The identity is kept in
+`$XDG_CONFIG_HOME/AltServer/anisette-v3/<host>.json` (default `~/.config/...`), readable by its owner
+only. Delete that file to start over with a new identity. `HTTPS_PROXY` is honoured for the anisette
+server and the provisioning requests.
+
+`ALTSERVER_ANISETTE_PROTOCOL` selects the protocol: `auto` (default) uses v3 when the server answers
+`/v3/client_info` and v1 otherwise; `v3` and `v1` force one. A server that can't be reached is an
+error, not a reason to fall back to v1. The log shows the protocol, whether the identity was
+provisioned or loaded, and the first 8 characters of its device ID.
+
+AltStore receives the same identity when it asks AltServer for anisette data.
+
+## Log output
+
+The log, with or without `-d`, shows the steps, status codes, `au`/`hsc` and the first 8 characters
+of the anisette device ID. It does not show passwords, verification codes, GSA tokens, the decrypted
+sign-in response or anisette secrets (one-time password, machine ID, local user ID, `adi.pb`). `-d`
+also turns on libimobiledevice's own debug output for the device connection.
 
 ## Prebuilt binaries
 
@@ -213,24 +260,26 @@ docker run --rm --platform linux/amd64 -v "$PWD:/workdir" -w /workdir \
 The result is a statically linked `build/AltServer-x86_64`. Other architectures use the
 `altserver_builder_alpine_{aarch64,armv7,i386}` images.
 
-Sanity-check that all three fixes are present:
+Sanity-check that the fixes are present:
 
 ```bash
 strings build/AltServer-x86_64 | grep -c "missing path separator"   # Fix 1, new ldid      -> 1
 strings build/AltServer-x86_64 | grep -c "Sanitized client info"    # Fix 2, sign-in        -> 1
 grep -c idevice_sockaddr_len libraries/libimobiledevice/src/idevice.c  # Fix 3, netmuxd  -> >= 1
+strings build/AltServer-x86_64 | grep -c "noTrustedDevices"          # Fix 7, 2FA choice     -> >= 1
+strings build/AltServer-x86_64 | grep -c "/v3/provisioning_session"  # Fix 8, anisette v3    -> 1
 ```
 
 ## Running
 
 ```bash
 USBMUXD_SOCKET_ADDRESS=127.0.0.1:27015 \
-ALTSERVER_ANISETTE_SERVER=https://mac-ani.jkcoxson.com \
 ./AltServer-x86_64 -d -u <UDID> -a <apple-id> -p <password> AltStore.ipa
 ```
 
-`-d` enables debug output. Wi-Fi installs need netmuxd listening on that address (see Fix 3). Any
-anisette server that provides Mac anisette works; see Fix 5 before you choose one.
+`-d` enables debug output. Wi-Fi installs need netmuxd listening on that address (see Fix 3). The
+default anisette server is `https://new.ani.sidestore.io` with the v3 protocol (Fix 8);
+`ALTSERVER_ANISETTE_SERVER` selects another one, which must provide Mac anisette (Fix 5).
 
 To check sign-in without real credentials, run it with a throwaway account. HTTP 503 means Apple's
 edge is blocking, `-80045` means the client info does not match the anisette provisioning (Fix 4),

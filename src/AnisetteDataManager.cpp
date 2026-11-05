@@ -56,10 +56,11 @@ using namespace web::http::client;          // HTTP client features
 
 std::string GetAnisetteURL() {
 	const char *server = getenv("ALTSERVER_ANISETTE_SERVER");
-	if (server) {
+	if (server && strlen(server) > 0) {
 		return server;
 	}
-	return U("https://armconverter.com/anisette/irGb3Quww8zrhgqnzmrx");
+	// Provides Mac anisette (README-NG, Fix 5) and speaks anisette v3 (Fix 8).
+	return U("https://new.ani.sidestore.io");
 }
 
 // Apple rejects any gsa.apple.com request whose X-Mme-Client-Info (aka
