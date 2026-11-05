@@ -180,6 +180,13 @@ required two-factor authentication. Set `ALTSERVER_2FA=sms` for such an account.
 the trusted-device request and uses the SMS endpoints whenever a code is needed. The log shows `au` and
 `hsc` of the sign-in response and which SMS code to enter.
 
+Apple ties the code to the anisette identity it was validated with. `new.ani.sidestore.io` returns a new
+identity (Device-Id, MD-LU, MD-M) on every request, so the anisette refreshes added in Fix 4 made the
+second sign-in come from another device than the one that validated the code. A refresh is now used only
+when it returns the same device; otherwise the sign-in keeps its original anisette data. The log names
+the Device-Id (first 8 characters) at each step. With such a server every sign-in is still a new device
+to Apple, so it asks for a code every time.
+
 This has not been verified against Apple yet. Try it once, and if it fails, stop and read the log
 (`-d`) before trying again; see the account-lock warning above.
 
