@@ -3,6 +3,7 @@
 #include <chrono>
 #include <ctime>
 #include <cstdlib>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -77,10 +78,43 @@ namespace
 		return url;
 	}
 
-	// HTTPS_PROXY / https_proxy, when set, for the anisette server and the provisioning requests.
-	std::optional<web_proxy> EnvironmentProxy()
+	// The proxy the environment names for url, for the anisette server and the provisioning requests:
+	// HTTPS_PROXY for https and wss, HTTP_PROXY for http and ws, unless NO_PROXY lists the host ("*", the
+	// host itself, or a domain it is in).
+	std::optional<web_proxy> EnvironmentProxy(const std::string& url)
 	{
-		for (const char* name : { "HTTPS_PROXY", "https_proxy" })
+		uri target(url);
+		std::string host = target.host();
+
+		for (const char* name : { "NO_PROXY", "no_proxy" })
+		{
+			const char* value = getenv(name);
+			if (value == nullptr)
+			{
+				continue;
+			}
+
+			std::stringstream entries(value);
+			std::string entry;
+			while (std::getline(entries, entry, ','))
+			{
+				entry.erase(0, entry.find_first_not_of(" \t"));
+				entry.erase(entry.find_last_not_of(" \t") + 1);
+				if (!entry.empty() && entry[0] == '.')
+				{
+					entry.erase(0, 1);
+				}
+
+				bool isInDomain = host.size() > entry.size() && host.compare(host.size() - entry.size() - 1, std::string::npos, "." + entry) == 0;
+				if (entry == "*" || (!entry.empty() && (host == entry || isInDomain)))
+				{
+					return std::nullopt;
+				}
+			}
+		}
+
+		bool isSecure = target.scheme() == "https" || target.scheme() == "wss";
+		for (const char* name : isSecure ? std::vector<const char*>{ "HTTPS_PROXY", "https_proxy" } : std::vector<const char*>{ "HTTP_PROXY", "http_proxy" })
 		{
 			const char* value = getenv(name);
 			if (value != nullptr && strlen(value) > 0)
@@ -97,7 +131,7 @@ namespace
 		http_client_config config;
 		config.set_validate_certificates(validateCertificates);
 		config.set_timeout(std::chrono::seconds(60));
-		if (auto proxy = EnvironmentProxy())
+		if (auto proxy = EnvironmentProxy(url))
 		{
 			config.set_proxy(*proxy);
 		}
@@ -147,6 +181,15 @@ namespace
 
 	ClientInfo FetchClientInfo(const std::string& serverURL)
 	{
+		static std::mutex mutex;
+		static std::map<std::string, ClientInfo> clientInfoByURL;
+
+		std::lock_guard<std::mutex> lock(mutex);
+		if (clientInfoByURL.count(serverURL) > 0)
+		{
+			return clientInfoByURL[serverURL];
+		}
+
 		auto client = MakeClient(serverURL, true);
 		auto response = client.request(methods::GET, "/v3/client_info").get();
 		if (response.status_code() != status_codes::OK)
@@ -160,10 +203,12 @@ namespace
 			throw V3Error(serverURL + "/v3/client_info has no client_info and user_agent.");
 		}
 
-		return { json.at("client_info").as_string(), json.at("user_agent").as_string() };
+		clientInfoByURL[serverURL] = { json.at("client_info").as_string(), json.at("user_agent").as_string() };
+		return clientInfoByURL[serverURL];
 	}
 
-	// <config>/AltServer/anisette-v3/<host>.json, where <config> is $XDG_CONFIG_HOME or ~/.config.
+	// <config>/AltServer/anisette-v3/<host>.json, where <config> is $XDG_CONFIG_HOME or ~/.config. A port or
+	// path in the server URL is added to the name, so each server keeps its own identity.
 	std::string StateDirectory()
 	{
 		const char* xdgConfigHome = getenv("XDG_CONFIG_HOME");
@@ -193,6 +238,15 @@ namespace
 		if (!serverURI.is_port_default())
 		{
 			name += "_" + std::to_string(serverURI.port());
+		}
+
+		std::string path = serverURI.path();
+		if (path != "" && path != "/")
+		{
+			for (auto c : path)
+			{
+				name += isalnum((unsigned char)c) || c == '-' || c == '.' ? c : '_';
+			}
 		}
 
 		return StateDirectory() + "/" + name + ".json";
@@ -429,6 +483,8 @@ namespace
 		connection.send(message).wait();
 	}
 
+	void RunProvisioningSession(web::websockets::client::websocket_client& connection, const std::string& startURL, const std::string& finishURL, const ClientInfo& clientInfo, State& state);
+
 	// Provisions the identity: the server drives Apple's midStartProvisioning/midFinishProvisioning over
 	// the /v3/provisioning_session websocket, and this computer relays the Apple requests as the device.
 	void Provision(const std::string& serverURL, const ClientInfo& clientInfo, State& state)
@@ -457,7 +513,7 @@ namespace
 		}
 
 		web::websockets::client::websocket_client_config config;
-		if (auto proxy = EnvironmentProxy())
+		if (auto proxy = EnvironmentProxy(socketURL))
 		{
 			config.set_proxy(*proxy);
 		}
@@ -465,6 +521,36 @@ namespace
 		web::websockets::client::websocket_client connection(config);
 		connection.connect(socketURL).wait();
 
+		try
+		{
+			RunProvisioningSession(connection, startURL, finishURL, clientInfo, state);
+			connection.close().wait();
+		}
+		catch (...)
+		{
+			// Close the session on every failure, so the server isn't left waiting for its timeout.
+			try
+			{
+				connection.close().wait();
+			}
+			catch (...)
+			{
+			}
+
+			throw;
+		}
+
+		if (state.adiPB.empty())
+		{
+			throw V3Error("The server's provisioning result has no adi.pb.");
+		}
+
+		odslog("Anisette v3: provisioned device " << DeviceID(state).substr(0, 8) << ".");
+	}
+
+	// The /v3/provisioning_session conversation, until the server sends the provisioned adi.pb.
+	void RunProvisioningSession(web::websockets::client::websocket_client& connection, const std::string& startURL, const std::string& finishURL, const ClientInfo& clientInfo, State& state)
+	{
 		while (true)
 		{
 			auto message = json::value::parse(ReceiveText(connection));
@@ -493,23 +579,14 @@ namespace
 			else if (result == "ProvisioningSuccess" && message.has_field("adi_pb") && message.at("adi_pb").is_string())
 			{
 				state.adiPB = utility::conversions::from_base64(message.at("adi_pb").as_string());
-				connection.close().wait();
-				break;
+				return;
 			}
 			else
 			{
 				std::string detail = message.has_field("message") && message.at("message").is_string() ? ": " + message.at("message").as_string() : "";
-				connection.close().wait();
 				throw V3Error("Provisioning failed, the server answered " + (result.empty() ? std::string("without a result") : result) + detail + ".");
 			}
 		}
-
-		if (state.adiPB.empty())
-		{
-			throw V3Error("The server's provisioning result has no adi.pb.");
-		}
-
-		odslog("Anisette v3: provisioned device " << DeviceID(state).substr(0, 8) << ".");
 	}
 
 	// Headers from /v3/get_headers, or nothing when the server says the identity isn't provisioned (-45061).
@@ -521,7 +598,16 @@ namespace
 
 		auto client = MakeClient(serverURL, true);
 		auto response = client.request(methods::POST, "/v3/get_headers", body).get();
-		auto json = response.extract_json(true).get();
+
+		json::value json;
+		try
+		{
+			json = response.extract_json(true).get();
+		}
+		catch (json::json_exception&)
+		{
+			throw V3Error(serverURL + "/v3/get_headers answered HTTP " + std::to_string(response.status_code()) + " without JSON.");
+		}
 
 		std::string result = json.has_field("result") && json.at("result").is_string() ? json.at("result").as_string() : "";
 		if (result == "Headers")
@@ -571,12 +657,7 @@ std::shared_ptr<AnisetteData> AnisetteV3::FetchAnisetteData(const std::string& s
 
 	std::string url = TrimmedURL(serverURL);
 
-	static std::map<std::string, ClientInfo> clientInfoByURL;
-	if (clientInfoByURL.count(url) == 0)
-	{
-		clientInfoByURL[url] = FetchClientInfo(url);
-	}
-	ClientInfo clientInfo = clientInfoByURL[url];
+	ClientInfo clientInfo = FetchClientInfo(url);
 
 	// Provisioning goes to Apple too, so it already sends the client info Apple will see later.
 	clientInfo.clientInfo = clientInfoFilter(clientInfo.clientInfo);
@@ -592,7 +673,10 @@ std::shared_ptr<AnisetteData> AnisetteV3::FetchAnisetteData(const std::string& s
 	else
 	{
 		state.identifier.resize(16);
-		RAND_bytes(state.identifier.data(), (int)state.identifier.size());
+		if (RAND_bytes(state.identifier.data(), (int)state.identifier.size()) != 1)
+		{
+			throw V3Error("Couldn't generate a random identifier for a new identity.");
+		}
 	}
 
 	if (state.adiPB.empty())

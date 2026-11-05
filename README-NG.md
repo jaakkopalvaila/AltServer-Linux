@@ -190,7 +190,8 @@ So the method is chosen from the account's 2FA info. `ALTSERVER_2FA` selects it:
   requesting the code with `PUT`. Any other account keeps the trusted-device path. `pushMode` doesn't
   decide, because it is `sms` for the phone numbers of trusted-device accounts too.
 - `sms`: always the SMS path, requesting the code with `PUT`.
-- `trusteddevice`: always the trusted-device path, as before Fix 7.
+- `trusteddevice`: the trusted-device path, as before Fix 7, except for `au` = `secondaryAuth`, which
+  has no trusted device to send a code to.
 
 At the SMS code prompt, `resend` requests one new SMS, for when the expected one doesn't arrive. The
 log shows `au` and `hsc` of the sign-in response, the 2FA info (without the phone number), the chosen
@@ -220,8 +221,9 @@ An anisette v3 server provisions one identity instead, and the identity's keycha
 `midStartProvisioning` and `midFinishProvisioning` (relayed by this computer as the device), and
 `POST /v3/get_headers` for each set of anisette data. The identity is kept in
 `$XDG_CONFIG_HOME/AltServer/anisette-v3/<host>.json` (default `~/.config/...`), readable by its owner
-only. Delete that file to start over with a new identity. `HTTPS_PROXY` is honoured for the anisette
-server and the provisioning requests.
+only. A port or path in the server URL is added to the file name. Delete that file to start over with a
+new identity. The v3 client's requests (anisette server and provisioning) honour `HTTPS_PROXY`,
+`HTTP_PROXY` and `NO_PROXY`; the v1 client and the Apple sign-in itself do not use a proxy.
 
 `ALTSERVER_ANISETTE_PROTOCOL` selects the protocol: `auto` (default) uses v3 when the server answers
 `/v3/client_info` and v1 otherwise; `v3` and `v1` force one. A server that can't be reached is an
