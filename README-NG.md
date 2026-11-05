@@ -170,7 +170,15 @@ endpoints that rileytestut/AltSign#62 proposes and [isideload](https://github.co
 `POST /auth/verify/phone/securitycode` with the code. The code goes to the account's first trusted
 phone number (id 1). AltServer prints `Enter two factor code` and reads the code from standard input.
 If Apple says a code was already sent and is still valid (HTTP 412, or `-22979` / `-22981`), no new
-SMS is requested. A wrong code is `-21669`; any other error shows Apple's message.
+SMS is requested. A wrong code is `-21669`; any other error, also inside a 2xx answer, shows Apple's
+message.
+
+GrandSlam does not always report such an account as `secondaryAuth`. On 2026-11-05 an account without
+a trusted device got `trustedDeviceSecondaryAuth`: the trusted-device code request made Apple send an
+SMS, the trusted-device validation answered that code with HTTP 200, and the second sign-in still
+required two-factor authentication. Set `ALTSERVER_2FA=sms` for such an account. AltServer then skips
+the trusted-device request and uses the SMS endpoints whenever a code is needed. The log shows `au` and
+`hsc` of the sign-in response and which SMS code to enter.
 
 This has not been verified against Apple yet. Try it once, and if it fails, stop and read the log
 (`-d`) before trying again; see the account-lock warning above.
