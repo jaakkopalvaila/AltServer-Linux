@@ -10,6 +10,8 @@ Type=oneshot
 # Same mux and anisette server as altserver.service.
 Environment=USBMUXD_SOCKET_ADDRESS=127.0.0.1:27015
 Environment=ALTSERVER_ANISETTE_SERVER=https://new.ani.sidestore.io
+# With several phones on the network, name the one to check (default: the first netmuxd lists).
+#Environment=ALTSERVER_MONITOR_UDID=<UDID>
 ExecStart=/usr/bin/python3 %h/AltServer/altserver_monitor.py
 # The exit code is the Nagios one (1 warning, 2 critical, 3 unknown). The monitor reports problems itself
 # (history file, ntfy), so a warning shouldn't also leave the unit marked as failed.

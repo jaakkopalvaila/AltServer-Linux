@@ -54,6 +54,12 @@ EXPIRY_WARNING_DAYS = 2
 # in the overall state (the check itself still says CRITICAL).
 DEVICE_DEPENDENT = ("iPhone advertising", "iPhone reachability")
 
+# Checks that follow the phone around: a phone asleep for one run, or away for the evening, flips them.
+# Their notifications wait until the new state has held for DEBOUNCE_RUNS runs (1.5 hours at 30
+# minutes), so ntfy reports a phone that is gone, not every nap. Other checks notify at once.
+DEBOUNCED = DEVICE_DEPENDENT + ("Provisioning profiles",)
+DEBOUNCE_RUNS = 4
+
 HISTORY_MAX_LINES = 2000  # about six weeks at one run every 30 minutes
 
 # Old 40-hex UDIDs and the 8-16 form newer devices use.
@@ -219,7 +225,17 @@ def devices_via(flag, run=run, env=None, unset=()):
         return None, out
     if "Unable to retrieve device list" in out:
         return None, "no mux answered"
+    if rc != 0:
+        return None, "idevice_id exited %d: %s" % (rc, out.strip()[:200])
     return [line.split()[0] for line in out.splitlines() if line.strip()], ""
+
+
+def chosen_device(devices):
+    """The device to check: ALTSERVER_MONITOR_UDID if it is listed, else the first one."""
+    wanted = os.environ.get("ALTSERVER_MONITOR_UDID")
+    if wanted:
+        return wanted if wanted in devices else None
+    return devices[0] if devices else None
 
 
 # How idevicepair reports failures: pairing-stage failures are words without a number, connection-
@@ -270,14 +286,19 @@ def check_device(run=run, address=None):
     # Ubuntu's usbmuxd, at its default socket. It exits when no cable is attached, which is normal.
     usb, usb_note = devices_via("-l", run, unset=("USBMUXD_SOCKET_ADDRESS",))
 
+    if wireless and chosen_device(wireless) is None:
+        return result(name, FAIL, "ALTSERVER_MONITOR_UDID isn't listed by netmuxd",
+                      "%d other device(s) listed" % len(wireless),
+                      "The phone is asleep or away, or ALTSERVER_MONITOR_UDID is wrong.")
     if wireless:
-        rc, out = run(["idevicepair", "-n", "validate"], env=mux)
+        rc, out = run(["idevicepair", "-n", "-u", chosen_device(wireless), "validate"], env=mux)
         if rc == 0:
             return result(name, OK, "Reachable through netmuxd (Wi-Fi), pairing valid",
                           "also connected over USB" if usb else "")
         if rc is None:
-            return result(name, UNKNOWN, "Listed by netmuxd; idevicepair couldn't run", out,
-                          "sudo apt install libimobiledevice-utils")
+            fix = "sudo apt install libimobiledevice-utils" if "not installed" in out else \
+                "The phone was listed but didn't answer in time; it may be falling asleep."
+            return result(name, UNKNOWN, "Listed by netmuxd; idevicepair couldn't finish", out, fix)
         state, summary, fix = PAIR_ADVICE[classify_pair_failure(out)]
         return result(name, state, summary, out.strip()[:300], fix)
 
@@ -319,10 +340,16 @@ def parse_profile(data):
 
 def read_profiles(run=run, address=None):
     """[(name, expiration)] of the phone's provisioning profiles, or (None, note) if unreadable."""
+    mux = {"USBMUXD_SOCKET_ADDRESS": address or mux_address()}
+    devices, note = devices_via("-n", run, env=mux)
+    if devices is None:
+        return None, note
+    udid = chosen_device(devices)
+    if udid is None:
+        return None, "the phone isn't listed by netmuxd"
     directory = tempfile.mkdtemp(prefix="altserver-monitor-")
     try:
-        rc, out = run(["ideviceprovision", "-n", "copy", directory],
-                      env={"USBMUXD_SOCKET_ADDRESS": address or mux_address()}, timeout=30)
+        rc, out = run(["ideviceprovision", "-n", "-u", udid, "copy", directory], env=mux, timeout=30)
         if rc is None:
             return None, out
         if rc != 0:
@@ -379,8 +406,8 @@ def identity_path(server, environ=None):
     base = environ.get("XDG_CONFIG_HOME") or os.path.join(environ.get("HOME", ""), ".config")
     parts = urllib.parse.urlsplit(server.rstrip("/"))
     name = parts.hostname or ""
-    default_port = {"https": 443, "http": 80}.get(parts.scheme)
-    if parts.port is not None and parts.port != default_port:
+    # Like cpprest's is_port_default(): any port written in the URL is added, even 443.
+    if parts.port is not None:
         name += "_%d" % parts.port
     if parts.path not in ("", "/"):
         name += "".join(c if c.isalnum() or c in "-." else "_" for c in parts.path)
@@ -516,20 +543,23 @@ def history_path(environ=None):
     return environ.get("ALTSERVER_MONITOR_HISTORY") or os.path.join(state_home(environ), "monitor-history.jsonl")
 
 
-def last_states(path):
-    """{check name: state} from the history's last run, or {} if there is none."""
+def recent_states(path, count=DEBOUNCE_RUNS):
+    """[{check name: state}] of the history's last count runs, oldest first."""
     try:
         with open(path, encoding="utf-8") as fh:
             lines = fh.read().splitlines()
     except FileNotFoundError:
-        return {}
+        return []
+    runs = []
     for line in reversed(lines):
         try:
             entry = json.loads(line)
-            return {name: check["state"] for name, check in entry["checks"].items()}
+            runs.insert(0, {name: check["state"] for name, check in entry["checks"].items()})
         except (ValueError, KeyError, TypeError, AttributeError):
             continue
-    return {}
+        if len(runs) == count:
+            break
+    return runs
 
 
 def append_history(path, entry, max_lines=HISTORY_MAX_LINES):
@@ -541,17 +571,33 @@ def append_history(path, entry, max_lines=HISTORY_MAX_LINES):
     except FileNotFoundError:
         lines = []
     lines = (lines + [json.dumps(entry, sort_keys=True)])[-max_lines:]
-    temporary = path + ".tmp"
+    # A name of its own, so a manual run and the timer's run can't write the same temporary file.
+    temporary = "%s.%d.tmp" % (path, os.getpid())
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
     os.replace(temporary, path)
 
 
-def changes(previous, checks):
-    """[(check, previous state, new state)] for checks whose state changed. A new check counts as OK before."""
-    return [(check, previous.get(check["name"], OK), check["state"])
-            for check in checks if previous.get(check["name"], OK) != check["state"]]
+def changes(history, checks):
+    """[(check, state before, new state)] to notify about. history: earlier runs' states, oldest first.
+
+    A check missing from history counts as OK before. A DEBOUNCED check is reported once, when its new
+    state has held for DEBOUNCE_RUNS runs including this one.
+    """
+    changed = []
+    for check in checks:
+        name, state = check["name"], check["state"]
+        if name in DEBOUNCED:
+            streak = history[-(DEBOUNCE_RUNS - 1):]
+            if len(streak) < DEBOUNCE_RUNS - 1 or any(run.get(name, OK) != state for run in streak):
+                continue
+            before = history[-DEBOUNCE_RUNS].get(name, OK) if len(history) >= DEBOUNCE_RUNS else OK
+        else:
+            before = history[-1].get(name, OK) if history else OK
+        if before != state:
+            changed.append((check, before, state))
+    return changed
 
 
 def ntfy_url_path(environ=None):
@@ -608,12 +654,12 @@ def main(argv=None):
 
     if not args.no_history:
         path = history_path()
-        previous = last_states(path)
+        history = recent_states(path)
         now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
         append_history(path, {"time": now, "overall": overall,
                               "checks": {check["name"]: {"state": check["state"], "summary": check["summary"]}
                                          for check in checks}})
-        changed = changes(previous, checks)
+        changed = changes(history, checks)
         if changed and not args.no_notify:
             url, why_not = read_ntfy_url(ntfy_url_path())
             if url:

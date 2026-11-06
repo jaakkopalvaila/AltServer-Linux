@@ -201,13 +201,18 @@ uses only the Python standard library and is adapted from
 - **History**: every run is appended to `~/.local/state/AltServer/monitor-history.jsonl` (JSON lines,
   mode 600, the last 2000 runs).
 - **Notifications**: when a check's state changes (including the profile warning starting), the monitor
-  posts to an [ntfy](https://ntfy.sh) topic. Messages never contain the phone's UDID. The topic URL is a
-  secret, so it lives in a file only you can read, never in the repository:
+  posts to an [ntfy](https://ntfy.sh) topic. The phone checks (advertising, reachability, profiles)
+  notify only once their new state has held for 4 runs (1.5 hours), so a sleeping phone or an evening
+  away isn't news. Messages never contain the phone's UDID. The topic URL is a secret, so it lives in a
+  file only you can read, never in the repository:
 
   ```bash
-  install -m 600 /dev/null ~/.config/AltServer/ntfy-url
+  install -D -m 600 /dev/null ~/.config/AltServer/ntfy-url
   echo "https://ntfy.sh/<your-secret-topic>" > ~/.config/AltServer/ntfy-url
   ```
+
+With more than one iPhone on the network, set `ALTSERVER_MONITOR_UDID` in
+`altserver-monitor.service` to the phone to check; otherwise the first one netmuxd lists is used.
 
 Install and test:
 

@@ -30,9 +30,9 @@ class FakeRun:
 
     def __call__(self, cmd, timeout=15, env=None, unset=()):
         self.calls.append((cmd, env or {}, tuple(unset)))
-        if cmd[0] == "ideviceprovision" and cmd[2] == "copy" and (cmd[0], cmd[1]) in self.answers:
+        if cmd[0] == "ideviceprovision" and "copy" in cmd and (cmd[0], cmd[1]) in self.answers:
             for name, data in self.profiles.items():
-                with open(os.path.join(cmd[3], name), "wb") as fh:
+                with open(os.path.join(cmd[-1], name), "wb") as fh:
                     fh.write(data)
         return self.answers.get((cmd[0], cmd[1]), (None, "%s is not installed" % cmd[0]))
 
@@ -150,6 +150,39 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(check["state"], monitor.WARN)
         self.assertIn("USB only", check["summary"])
 
+    def test_validates_the_listed_device(self):
+        fake = FakeRun({
+            ("idevice_id", "-n"): (0, "%s (Network)\n" % UDID),
+            ("idevice_id", "-l"): (0, ""),
+            ("idevicepair", "-n"): (0, "SUCCESS"),
+        })
+        monitor.check_device(fake, "127.0.0.1:27015")
+        pair_call = next(call for call in fake.calls if call[0][0] == "idevicepair")
+        self.assertEqual(pair_call[0], ["idevicepair", "-n", "-u", UDID, "validate"])
+
+    def test_idevice_id_error_is_not_a_device(self):
+        fake = FakeRun({("idevice_id", "-n"): (1, "ERROR: Could not connect to usbmuxd: Connection timed out\n"),
+                        ("idevice_id", "-l"): (0, "")})
+        check = monitor.check_device(fake, "127.0.0.1:27015")
+        self.assertEqual(check["state"], monitor.UNKNOWN)
+        self.assertFalse(any(call[0][0] == "idevicepair" for call in fake.calls))
+
+    def test_monitor_udid_not_listed(self):
+        fake = FakeRun({("idevice_id", "-n"): (0, "%s\n" % UDID), ("idevice_id", "-l"): (0, "")})
+        os.environ["ALTSERVER_MONITOR_UDID"] = "00008110-0000000000000001"
+        try:
+            check = monitor.check_device(fake, "127.0.0.1:27015")
+        finally:
+            del os.environ["ALTSERVER_MONITOR_UDID"]
+        self.assertEqual(check["state"], monitor.FAIL)
+
+    def test_idevicepair_timeout_is_not_an_install_problem(self):
+        fake = FakeRun({("idevice_id", "-n"): (0, "%s\n" % UDID), ("idevice_id", "-l"): (0, "")})
+        fake.answers[("idevicepair", "-n")] = (None, "idevicepair timed out after 15s")
+        check = monitor.check_device(fake, "127.0.0.1:27015")
+        self.assertEqual(check["state"], monitor.UNKNOWN)
+        self.assertNotIn("apt install", check["fix"])
+
     def test_dead_netmuxd_is_unknown(self):
         fake = FakeRun({("idevice_id", "-n"): (255, "ERROR: Unable to retrieve device list!\n"),
                         ("idevice_id", "-l"): (255, "ERROR: Unable to retrieve device list!\n")})
@@ -165,8 +198,12 @@ class DeviceTests(unittest.TestCase):
 
 class ProfileTests(unittest.TestCase):
     def profiles_check(self, profiles, rc=0):
-        fake = FakeRun({("ideviceprovision", "-n"): (rc, "")}, profiles)
+        fake = FakeRun({("idevice_id", "-n"): (0, "%s (Network)\n" % UDID),
+                        ("ideviceprovision", "-n"): (rc, "")}, profiles)
         return monitor.check_profiles(fake, "127.0.0.1:27015", now=NOW), fake
+
+    def provision_call(self, fake):
+        return next(call for call in fake.calls if call[0][0] == "ideviceprovision")
 
     def test_parse_profile(self):
         name, expiration = monitor.parse_profile(mobileprovision("Apollo", NOW + datetime.timedelta(days=5)))
@@ -184,7 +221,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(check["state"], monitor.OK)
         self.assertIn("4.5 days (Apollo)", check["summary"])
         self.assertNotIn(UDID, json.dumps(check))
-        self.assertEqual(fake.calls[0][0][:3], ["ideviceprovision", "-n", "copy"])
+        self.assertEqual(self.provision_call(fake)[0][:5], ["ideviceprovision", "-n", "-u", UDID, "copy"])
 
     def test_under_two_days_warns(self):
         check, _ = self.profiles_check({"a.mobileprovision": mobileprovision("Apollo", NOW + datetime.timedelta(hours=30))})
@@ -202,9 +239,13 @@ class ProfileTests(unittest.TestCase):
         check, _ = self.profiles_check({}, rc=255)
         self.assertEqual(check["state"], monitor.UNKNOWN)
 
+    def test_phone_not_listed_is_unknown(self):
+        fake = FakeRun({("idevice_id", "-n"): (0, ""), ("ideviceprovision", "-n"): (0, "")})
+        self.assertEqual(monitor.check_profiles(fake, "127.0.0.1:27015", now=NOW)["state"], monitor.UNKNOWN)
+
     def test_temporary_directory_is_removed(self):
         _, fake = self.profiles_check({"a.mobileprovision": mobileprovision("Apollo", NOW + datetime.timedelta(days=6))})
-        self.assertFalse(os.path.exists(fake.calls[0][0][3]))
+        self.assertFalse(os.path.exists(self.provision_call(fake)[0][-1]))
 
 
 class AnisetteTests(unittest.TestCase):
@@ -226,6 +267,9 @@ class AnisetteTests(unittest.TestCase):
                          os.path.join(base, "new.ani.sidestore.io.json"))
         self.assertEqual(monitor.identity_path("http://localhost:6969", self.environ),
                          os.path.join(base, "localhost_6969.json"))
+        # cpprest counts any port written in the URL, even the scheme's default.
+        self.assertEqual(monitor.identity_path("https://new.ani.sidestore.io:443", self.environ),
+                         os.path.join(base, "new.ani.sidestore.io_443.json"))
         self.assertEqual(monitor.identity_path("https://example.com/anisette/v3", self.environ),
                          os.path.join(base, "example.com_anisette_v3.json"))
         self.assertEqual(monitor.identity_path("https://example.com", {"XDG_CONFIG_HOME": "/cfg"}),
@@ -324,15 +368,33 @@ class RunTests(unittest.TestCase):
         with open(path) as fh:
             self.assertEqual(len(fh.read().splitlines()), 3)
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
-        self.assertEqual(monitor.last_states(path), {"A": monitor.WARN})
+        self.assertEqual(monitor.recent_states(path, 2), [{"A": monitor.OK}, {"A": monitor.WARN}])
+        self.assertEqual(os.listdir(os.path.dirname(path)), ["history.jsonl"])
 
     def test_changes_only(self):
         checks = [self.check("A", monitor.OK), self.check("B", monitor.WARN), self.check("C", monitor.FAIL)]
-        changed = monitor.changes({"A": monitor.OK, "B": monitor.WARN, "C": monitor.OK}, checks)
+        changed = monitor.changes([{"A": monitor.OK, "B": monitor.WARN, "C": monitor.OK}], checks)
         self.assertEqual([(check["name"], before, after) for check, before, after in changed],
                          [("C", monitor.OK, monitor.FAIL)])
         # A first run reports only what isn't OK.
-        self.assertEqual([check["name"] for check, _, _ in monitor.changes({}, checks)], ["B", "C"])
+        self.assertEqual([check["name"] for check, _, _ in monitor.changes([], checks)], ["B", "C"])
+
+    def test_phone_checks_notify_once_the_state_holds(self):
+        name = "iPhone reachability"
+        away = [self.check(name, monitor.FAIL)]
+        home = {name: monitor.OK}
+        gone = {name: monitor.FAIL}
+        # One run, two runs, three runs away: quiet. Four in a row: one notification.
+        self.assertEqual(monitor.changes([home, home, home], away), [])
+        self.assertEqual(monitor.changes([home, home, gone], away), [])
+        self.assertEqual(monitor.changes([home, gone, gone], away), [])
+        changed = monitor.changes([home, gone, gone, gone], away)
+        self.assertEqual([(before, after) for _, before, after in changed], [(monitor.OK, monitor.FAIL)])
+        # The fifth run away is not news.
+        self.assertEqual(monitor.changes([gone, gone, gone, gone], away), [])
+        # A nap of one run never notifies, in either direction.
+        back = [self.check(name, monitor.OK)]
+        self.assertEqual(monitor.changes([home, home, gone], back), [])
 
     def test_notification_has_no_udid(self):
         check = monitor.result("iPhone reachability", monitor.FAIL, "Lost %s" % UDID)
