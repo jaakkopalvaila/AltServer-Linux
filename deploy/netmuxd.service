@@ -1,0 +1,24 @@
+# netmuxd: a usbmuxd for iOS devices on the network (https://github.com/jkcoxson/netmuxd).
+# Install: sudo cp netmuxd.service /etc/systemd/system/ && sudo systemctl enable --now netmuxd
+#
+# --disable-unix: netmuxd's default UNIX socket is /var/run/usbmuxd, the same path Ubuntu's usbmuxd
+# (USB devices, udev-activated) uses. Two muxes on one socket path break each other, so netmuxd listens
+# on TCP 127.0.0.1:27015 only, and the USB usbmuxd keeps its socket for the one-time pairing.
+# --plist-storage /var/lib/lockdown: the pairing records usbmuxd wrote when the phone was paired over USB.
+# It runs as root because /var/lib/lockdown is root-only.
+
+[Unit]
+Description=netmuxd - network multiplexer for iOS devices
+After=network-online.target avahi-daemon.service
+Wants=network-online.target avahi-daemon.service
+
+[Service]
+Type=simple
+Environment=RUST_LOG=info
+ExecStart=/usr/local/bin/netmuxd --disable-unix --host 127.0.0.1 -p 27015 --plist-storage /var/lib/lockdown
+Restart=always
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target
