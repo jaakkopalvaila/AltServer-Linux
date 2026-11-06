@@ -315,6 +315,10 @@ class AnisetteTests(unittest.TestCase):
             return 200, {}, json.dumps({"client_info": "<Pixel 7> <Android;14>", "user_agent": "x"}).encode()
         self.assertEqual(monitor.check_anisette_server("https://x", fetch)[0]["state"], monitor.WARN)
 
+    def test_fetch_refuses_other_schemes(self):
+        with self.assertRaises(ValueError):
+            monitor.fetch("file:///etc/passwd")
+
     def test_server_without_v3(self):
         self.assertEqual(monitor.check_anisette_server("https://x", lambda url: (404, {}, b""))[0]["state"], monitor.FAIL)
 

@@ -62,6 +62,9 @@ DEBOUNCE_RUNS = 4
 
 HISTORY_MAX_LINES = 2000  # about six weeks at one run every 30 minutes
 
+SECONDS_PER_DAY = 86400
+MAX_RESPONSE_BYTES = 65536  # /v3/client_info is a few hundred bytes
+
 # Old 40-hex UDIDs and the 8-16 form newer devices use.
 UDID_PATTERN = re.compile(r"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}\b|\b[0-9A-Fa-f]{40}\b")
 
@@ -96,11 +99,16 @@ def run(cmd, timeout=15, env=None, unset=()):
 
 
 def fetch(url, timeout=10):
-    """GET url and return (status, headers, body bytes). Raises OSError (URLError) if unreachable."""
+    """GET url and return (status, headers, body bytes). Raises OSError (URLError) if unreachable.
+
+    Only http and https: the URL comes from configuration, and urllib would also open file: URLs.
+    """
+    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+        raise ValueError("not an http(s) URL: %s" % url)
     request = urllib.request.Request(url, headers={"User-Agent": "altserver-monitor"})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, dict(response.headers), response.read(65536)
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310: scheme checked above
+            return response.status, dict(response.headers), response.read(MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as error:
         return error.code, dict(error.headers or {}), b""
 
@@ -378,10 +386,12 @@ def check_profiles(run=run, address=None, now=None):
         return result(name, WARN, "No provisioning profiles on the phone", "",
                       "Nothing sideloaded is installed, or the profiles couldn't be read.")
 
-    left = sorted((expiration - now).total_seconds() / 86400.0 for _, expiration in profiles)
+    def days_left(expiration):
+        return (expiration - now).total_seconds() / SECONDS_PER_DAY
+
+    left = sorted(days_left(expiration) for _, expiration in profiles)
     by_expiry = sorted(profiles, key=lambda profile: profile[1])
-    detail = ", ".join("%s %.1f d" % (profile_name, (expiration - now).total_seconds() / 86400.0)
-                       for profile_name, expiration in by_expiry)
+    detail = ", ".join("%s %.1f d" % (profile_name, days_left(expiration)) for profile_name, expiration in by_expiry)
     expired = [profile_name for profile_name, expiration in by_expiry if expiration <= now]
     if expired:
         return result(name, FAIL, "Expired: %s" % ", ".join(expired), detail,
@@ -556,7 +566,7 @@ def recent_states(path, count=DEBOUNCE_RUNS):
             entry = json.loads(line)
             runs.insert(0, {name: check["state"] for name, check in entry["checks"].items()})
         except (ValueError, KeyError, TypeError, AttributeError):
-            continue
+            continue  # a damaged line (an interrupted write, a hand edit) doesn't stop the history
         if len(runs) == count:
             break
     return runs
