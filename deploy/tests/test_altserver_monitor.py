@@ -11,6 +11,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -60,6 +61,13 @@ class ProcessTests(unittest.TestCase):
         fake = FakeRun({("pgrep", "-a"): (0, out)})
         self.assertEqual(monitor.check_altserver_process(fake)["state"], monitor.FAIL)
 
+    def test_one_off_install_is_not_the_daemon(self):
+        out = "200 /home/u/AltServer/AltServer-x86_64 -u <udid> -a a@example.com -p x Apollo.ipa\n"
+        fake = FakeRun({("pgrep", "-a"): (0, out)})
+        self.assertEqual(monitor.check_altserver_process(fake)["state"], monitor.FAIL)
+        fake = FakeRun({("pgrep", "-a"): (0, out + "201 /home/u/AltServer/AltServer-x86_64\n")})
+        self.assertEqual(monitor.check_altserver_process(fake)["state"], monitor.OK)
+
     def test_no_process(self):
         fake = FakeRun({("pgrep", "-a"): (1, "")})
         self.assertEqual(monitor.check_altserver_process(fake)["state"], monitor.FAIL)
@@ -78,6 +86,12 @@ class AdvertisementTests(unittest.TestCase):
         check = monitor.check_altserver_advertisement(fake, hostname="koti")
         self.assertEqual(check["state"], monitor.FAIL)
         self.assertIn("not by this host", check["summary"])
+
+    def test_host_name_renamed_by_avahi_is_still_this_host(self):
+        fake = FakeRun({("avahi-browse", "-rpt"): (0, avahi_row("_altserver._tcp", "koti-2") + "\n")})
+        self.assertEqual(monitor.check_altserver_advertisement(fake, hostname="koti")["state"], monitor.OK)
+        fake = FakeRun({("avahi-browse", "-rpt"): (0, avahi_row("_altserver._tcp", "koti-tv") + "\n")})
+        self.assertEqual(monitor.check_altserver_advertisement(fake, hostname="koti")["state"], monitor.FAIL)
 
     def test_not_published(self):
         fake = FakeRun({("avahi-browse", "-rpt"): (0, "+;enp3s0;IPv4;x;_altserver._tcp;local\n")})
@@ -399,6 +413,41 @@ class RunTests(unittest.TestCase):
         # A nap of one run never notifies, in either direction.
         back = [self.check(name, monitor.OK)]
         self.assertEqual(monitor.changes([home, home, gone], back), [])
+        # A new install with the phone away: no earlier state is known, so no "OK -> CRITICAL".
+        self.assertEqual(monitor.changes([gone, gone, gone], away), [])
+
+    def test_undelivered_change_is_sent_again(self):
+        checks = [self.check("A", monitor.FAIL)]
+        self.assertEqual(monitor.changes([{"A": monitor.FAIL}], checks), [])
+        changed = monitor.changes([{"A": monitor.FAIL}], checks, unsent={"A": monitor.OK})
+        self.assertEqual([(before, after) for _, before, after in changed], [(monitor.OK, monitor.FAIL)])
+        # Recovered before delivery: nothing left to say.
+        self.assertEqual(monitor.changes([{"A": monitor.FAIL}], [self.check("A", monitor.OK)],
+                                         unsent={"A": monitor.OK}), [])
+
+    def test_failed_send_is_recorded_and_retried(self):
+        directory = tempfile.mkdtemp()
+        history = os.path.join(directory, "history.jsonl")
+        ntfy = os.path.join(directory, "ntfy-url")
+        with open(ntfy, "w") as fh:
+            fh.write("https://ntfy.sh/t\n")
+        os.chmod(ntfy, 0o600)
+        checks = [self.check("AltServer process", monitor.FAIL)]
+        sent = []
+
+        def unreachable(*args):
+            raise OSError("Network is unreachable")
+
+        env = {"ALTSERVER_MONITOR_HISTORY": history, "ALTSERVER_MONITOR_NTFY_FILE": ntfy}
+        with mock.patch.dict(os.environ, env), mock.patch.object(monitor, "run_checks", return_value=checks), \
+                mock.patch("sys.stdout"):
+            with mock.patch.object(monitor, "send_ntfy", side_effect=unreachable):
+                monitor.main([])
+            self.assertEqual(monitor.unsent_changes(history), {"AltServer process": monitor.OK})
+            with mock.patch.object(monitor, "send_ntfy", side_effect=lambda *a: sent.append(a)):
+                monitor.main([])
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(monitor.unsent_changes(history), {})
 
     def test_notification_has_no_udid(self):
         check = monitor.result("iPhone reachability", monitor.FAIL, "Lost %s" % UDID)

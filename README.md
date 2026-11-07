@@ -37,7 +37,7 @@ A free Apple ID allows 3 sideloaded apps at a time and 10 new app IDs per week, 
 
 - **Pair without a cable.** The first pairing needs USB.
 - **Refresh a phone it cannot reach.** The phone must be on the same network when a refresh is due.
-- **JIT.** Use [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) or SideStore for that.
+- **JIT.** AltJIT is not supported.
 - **Work alongside another signer.** Do not use the same Apple ID with AltServer on a Mac or PC,
   Sideloadly or Xcode at the same time: each one revokes the other's certificate.
 
@@ -57,8 +57,8 @@ A one-off install from the command line, with netmuxd running:
 USBMUXD_SOCKET_ADDRESS=127.0.0.1:27015 ./AltServer-x86_64 -u <UDID> -a <apple-id> -p <password> app.ipa
 ```
 
-Run `./AltServer-x86_64` without arguments to start the daemon that AltStore talks to. Two-factor codes
-are asked on the terminal.
+With the same `USBMUXD_SOCKET_ADDRESS` and no other arguments, AltServer runs as the daemon that AltStore
+talks to; docs/DEPLOY.md runs it as a systemd user service. Two-factor codes are asked on the terminal.
 
 **Protect your Apple account.** Repeated failed sign-ins make Apple lock the account, and unlocking can
 take days. After one or two failures, stop and read the log before you try again.

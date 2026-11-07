@@ -120,12 +120,18 @@ def fetch(url, timeout=10):
 ALTSERVER_ARGV0 = re.compile(r"^\d+\s+(\S*/)?AltServer[^\s/]*(\s|$)")
 
 
+def is_daemon(line):
+    """A pgrep -a line of the AltServer daemon, not a one-off install (-u UDID ... app.ipa)."""
+    args = line.split()[1:]
+    return (ALTSERVER_ARGV0.match(line) is not None and not args[0].endswith((".py", ".ipa"))
+            and not any(arg in ("-u", "--udid") or arg.endswith(".ipa") for arg in args[1:]))
+
+
 def check_altserver_process(run=run):
     rc, out = run(["pgrep", "-a", "-f", "AltServer"])
     if rc is None:
         return result("AltServer process", UNKNOWN, "Could not run pgrep", out, "Install procps.")
-    lines = [line for line in out.splitlines()
-             if ALTSERVER_ARGV0.match(line) and not line.split()[1].endswith((".py", ".ipa"))]
+    lines = [line for line in out.splitlines() if is_daemon(line)]
     if lines:
         return result("AltServer process", OK, "Running", lines[0][:160])
     return result("AltServer process", FAIL, "Not running", "",
@@ -149,9 +155,12 @@ def browse(service, run=run):
 
 
 def is_this_host(row, hostname=None):
-    """Was this resolved avahi row published by this host? row[6] is the host name."""
-    hostname = hostname or socket.gethostname()
-    return row[6].split(".")[0].lower() == hostname.split(".")[0].lower()
+    """Was this resolved avahi row published by this host? row[6] is the host name.
+
+    avahi adds "-2", "-3", ... to the host name when another device on the network claims the same one.
+    """
+    hostname = (hostname or socket.gethostname()).split(".")[0].lower()
+    return re.fullmatch(re.escape(hostname) + r"(-\d+)?", row[6].split(".")[0].lower()) is not None
 
 
 def check_altserver_advertisement(run=run, hostname=None):
@@ -589,22 +598,36 @@ def append_history(path, entry, max_lines=HISTORY_MAX_LINES):
     os.replace(temporary, path)
 
 
-def changes(history, checks):
+def unsent_changes(path):
+    """{check name: state before} of the last run's changes that ntfy didn't receive."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        unsent = json.loads(lines[-1]).get("unsent", {}) if lines else {}
+    except (FileNotFoundError, ValueError, AttributeError):
+        return {}
+    return unsent if isinstance(unsent, dict) else {}
+
+
+def changes(history, checks, unsent=None):
     """[(check, state before, new state)] to notify about. history: earlier runs' states, oldest first.
 
     A check missing from history counts as OK before. A DEBOUNCED check is reported once, when its new
-    state has held for DEBOUNCE_RUNS runs including this one.
+    state has held for DEBOUNCE_RUNS runs including this one and an earlier state is known. unsent: the
+    last run's changes that weren't delivered; their earlier state counts, so they are tried again.
     """
+    unsent = unsent or {}
     changed = []
     for check in checks:
         name, state = check["name"], check["state"]
         if name in DEBOUNCED:
             streak = history[-(DEBOUNCE_RUNS - 1):]
-            if len(streak) < DEBOUNCE_RUNS - 1 or any(run.get(name, OK) != state for run in streak):
+            if len(history) < DEBOUNCE_RUNS or any(run.get(name, OK) != state for run in streak):
                 continue
-            before = history[-DEBOUNCE_RUNS].get(name, OK) if len(history) >= DEBOUNCE_RUNS else OK
+            before = history[-DEBOUNCE_RUNS].get(name, OK)
         else:
             before = history[-1].get(name, OK) if history else OK
+        before = unsent.get(name, before)
         if before != state:
             changed.append((check, before, state))
     return changed
@@ -664,12 +687,11 @@ def main(argv=None):
 
     if not args.no_history:
         path = history_path()
-        history = recent_states(path)
+        changed = changes(recent_states(path), checks, unsent_changes(path))
         now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
-        append_history(path, {"time": now, "overall": overall,
-                              "checks": {check["name"]: {"state": check["state"], "summary": check["summary"]}
-                                         for check in checks}})
-        changed = changes(history, checks)
+        entry = {"time": now, "overall": overall,
+                 "checks": {check["name"]: {"state": check["state"], "summary": check["summary"]}
+                            for check in checks}}
         if changed and not args.no_notify:
             url, why_not = read_ntfy_url(ntfy_url_path())
             if url:
@@ -677,9 +699,12 @@ def main(argv=None):
                     send_ntfy(url, *notification(changed))
                     print("Notified: %d change(s)" % len(changed))
                 except (OSError, ValueError) as exc:
-                    print("ntfy failed: %s" % exc)
+                    # Typically the network is down. Keep the changes, so the next run sends them.
+                    entry["unsent"] = {check["name"]: before for check, before, _ in changed}
+                    print("ntfy failed, will retry next run: %s" % exc)
             else:
                 print("ntfy %s" % why_not)
+        append_history(path, entry)
 
     return EXIT_CODES[overall]
 
