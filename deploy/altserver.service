@@ -1,0 +1,29 @@
+# AltServer-Linux-NG as a systemd user service.
+# Install: cp altserver.service ~/.config/systemd/user/ && systemctl --user enable --now altserver
+# and once, so it runs without a login session: sudo loginctl enable-linger "$USER"
+# The binary is expected at ~/AltServer/AltServer-x86_64 (or -aarch64; change ExecStart).
+
+[Unit]
+Description=AltServer for AltStore (AltServer-Linux-NG)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# A pre-NG build once busy-looped and wrote 68 GB of logs (2026-09-06). Cap what one service can log.
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=500
+# netmuxd's TCP socket (deploy/netmuxd.service). The NG build reads netmuxd's addresses directly.
+Environment=USBMUXD_SOCKET_ADDRESS=127.0.0.1:27015
+# Mac anisette with the v3 protocol; this is also the built-in default (README-NG, Fixes 5 and 8).
+Environment=ALTSERVER_ANISETTE_SERVER=https://new.ani.sidestore.io
+# Wait up to 60 s for netmuxd to accept connections, then start anyway: AltServer retries devices itself.
+# ($$ is a literal $ for systemd.)
+ExecStartPre=/bin/bash -c 'for i in $$(seq 1 30); do (echo > /dev/tcp/127.0.0.1/27015) 2>/dev/null && exit 0; sleep 2; done; echo "warning: netmuxd did not answer on 127.0.0.1:27015, starting anyway"'
+ExecStart=%h/AltServer/AltServer-x86_64
+Restart=always
+RestartSec=5
+TimeoutStartSec=90
+
+[Install]
+WantedBy=default.target

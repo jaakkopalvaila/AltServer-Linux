@@ -1,0 +1,19 @@
+# Runs deploy/altserver_monitor.py once; started by altserver-monitor.timer.
+# Install: cp altserver-monitor.service altserver-monitor.timer ~/.config/systemd/user/
+#          systemctl --user enable --now altserver-monitor.timer
+
+[Unit]
+Description=AltServer-Linux health check
+
+[Service]
+Type=oneshot
+# Same mux and anisette server as altserver.service.
+Environment=USBMUXD_SOCKET_ADDRESS=127.0.0.1:27015
+Environment=ALTSERVER_ANISETTE_SERVER=https://new.ani.sidestore.io
+# With several phones on the network, name the one to check (default: the first netmuxd lists).
+#Environment=ALTSERVER_MONITOR_UDID=<UDID>
+ExecStart=/usr/bin/python3 %h/AltServer/altserver_monitor.py
+# The exit code is the Nagios one (1 warning, 2 critical, 3 unknown). The monitor reports problems itself
+# (history file, ntfy), so a warning shouldn't also leave the unit marked as failed.
+SuccessExitStatus=1 2 3
+TimeoutStartSec=5min

@@ -205,8 +205,9 @@ the Device-Id (first 8 characters) at each step. With such a server every sign-i
 to Apple, so it asks for a code every time.
 
 Verified on 2026-11-05: an account without trusted devices signed in with `ALTSERVER_2FA=sms` and
-v1 anisette from `new.ani.sidestore.io`, and AltServer installed an app. The `auto` choice has not been
-tried against Apple yet. If a sign-in fails, stop and read the log before trying again; see the
+v1 anisette from `new.ani.sidestore.io`, and AltServer installed an app. Later the same day, with the
+default `auto` and v3 anisette, Apple sent the code to a trusted device, `auto` chose the trusted-device
+path, and the install succeeded. If a sign-in fails, stop and read the log before trying again; see the
 account-lock warning above.
 
 ## Fix 8 — anisette v3: one identity, a code only once
@@ -292,3 +293,21 @@ edge is blocking, `-80045` means the client info does not match the anisette pro
 and an account error such as `-20970` "account information entered incorrectly" means the request
 passed every check up to the password. A made-up account cannot reach the step where `-80046`
 occurs, so this test cannot prove that a setup is free of it.
+
+## Deploying and monitoring
+
+[docs/DEPLOY.md](docs/DEPLOY.md) takes a fresh Ubuntu host to apps that refresh over Wi-Fi: netmuxd as a
+system service, AltServer as a user service, journal limits, the one-time USB pairing, the first
+sign-in and the anisette identity file, AltStore, and troubleshooting. The example unit files are in
+[deploy/](deploy).
+
+`deploy/altserver_monitor.py` checks the host every 30 minutes (a systemd user timer):
+- the AltServer process and its mDNS advertisement;
+- netmuxd, and the phone's advertisement and reachability;
+- the days left on the sideloaded apps' provisioning profiles;
+- the anisette v3 server and identity file, and the clock.
+
+It keeps a JSON-lines history, exits with Nagios codes, and notifies an ntfy topic when a check's state
+changes. Its process, mDNS and device checks are adapted from
+[Ben-Diehlci/altserver-linux](https://github.com/Ben-Diehlci/altserver-linux)'s `web/status_checks.py`
+(AGPL-3.0).
