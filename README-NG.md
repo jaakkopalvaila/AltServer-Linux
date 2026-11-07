@@ -205,8 +205,9 @@ the Device-Id (first 8 characters) at each step. With such a server every sign-i
 to Apple, so it asks for a code every time.
 
 Verified on 2026-11-05: an account without trusted devices signed in with `ALTSERVER_2FA=sms` and
-v1 anisette from `new.ani.sidestore.io`, and AltServer installed an app. The `auto` choice has not been
-tried against Apple yet. If a sign-in fails, stop and read the log before trying again; see the
+v1 anisette from `new.ani.sidestore.io`, and AltServer installed an app. Later the same day, with the
+default `auto` and v3 anisette, Apple sent the code to a trusted device, `auto` chose the trusted-device
+path, and the install succeeded. If a sign-in fails, stop and read the log before trying again; see the
 account-lock warning above.
 
 ## Fix 8 — anisette v3: one identity, a code only once
